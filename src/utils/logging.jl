@@ -6,6 +6,7 @@ function enable_logging!(;metrics::Bool=true,
                           taskdeps::Bool=true,
                           taskargs::Bool=false,
                           taskargs_mutable::Bool=true,
+                          taskargmoves::Bool=false,
                           profile::Bool=false)
     ml = TimespanLogging.MultiEventLog()
     ml[:core] = TimespanLogging.Events.CoreMetrics()
@@ -21,6 +22,9 @@ function enable_logging!(;metrics::Bool=true,
     end
     if taskargs
         ml[:taskargs] = Dagger.Events.TaskArguments{taskargs_mutable}()
+    end
+    if taskargmoves
+        ml[:taskargmoves] = Dagger.Events.TaskArgumentMoves()
     end
     if profile
         ml[:profile] = DaggerWebDash.ProfileMetrics()

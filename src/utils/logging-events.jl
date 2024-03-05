@@ -133,7 +133,48 @@ function (::TaskArguments{MA})(ev::Event{:start}) where MA
     end
     return
 end
-(td::TaskArguments)(ev::Event{:finish}) = nothing
+(ta::TaskArguments)(ev::Event{:finish}) = nothing
+
+"""
+    TaskArgumentMoves
+
+Records any `move`-derived copies of arguments of each task.
+"""
+struct TaskArgumentMoves
+    pre_move_args::Dict{Int,Dict{Union{Int,Symbol},UInt}}
+end
+TaskArgumentMoves() =
+    TaskArgumentMoves(Dict{Int,Dict{Union{Int,Symbol},UInt}}())
+init_similar(::TaskArgumentMoves) = TaskArgumentMoves()
+function (ta::TaskArgumentMoves)(ev::Event{:start})
+    if ev.category == :move
+        data = ev.timeline.data
+        if ismutable(data)
+            d = get!(Dict{Union{Int,Symbol},UInt}, ta.pre_move_args, ev.id.thunk_id)
+            d[ev.id.id] = objectid(data)
+        end
+    end
+    return
+end
+function (ta::TaskArgumentMoves)(ev::Event{:finish})
+    if ev.category == :move
+        post_data = ev.timeline.data
+        if ismutable(post_data)
+            if haskey(ta.pre_move_args, ev.id.thunk_id)
+                d = ta.pre_move_args[ev.id.thunk_id]
+                if haskey(d, ev.id.id)
+                    pre_data = d[ev.id.id]
+                    return ev.id.thunk_id, ev.id.id, pre_data, objectid(post_data)
+                else
+                    @warn "No TID $(ev.id.thunk_id), ID $(ev.id.id)"
+                end
+            else
+                @warn "No TID $(ev.id.thunk_id)"
+            end
+        end
+    end
+    return
+end
 
 """
     TaskDependencies

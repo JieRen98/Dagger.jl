@@ -7,6 +7,7 @@ GetIndex(input::ArrayOp, idx::Tuple) =
     GetIndex{eltype(input), ndims(input)}(input, idx)
 
 function stage(ctx::Context, gidx::GetIndex)
+    error("No getindex allowed")
     inp = cached_stage(ctx, gidx.input)
 
     dmn = domain(inp)
@@ -32,6 +33,7 @@ struct GetIndexScalar <: Computation
 end
 
 function stage(ctx::Context, gidx::GetIndexScalar)
+    error("No getindex allowed")
     inp = cached_stage(ctx, gidx.input)
     s = view(inp, ArrayDomain(gidx.idx))
     Dagger.@spawn identity(collect(s)[1])

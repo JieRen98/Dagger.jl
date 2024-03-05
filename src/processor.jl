@@ -146,3 +146,5 @@ iscompatible_arg(proc::OSProc, opts, args...) =
     any(child->
         all(arg->iscompatible_arg(child, opts, arg), args),
     children(proc))
+
+short_name(p::OSProc) = "W: $(p.pid)"

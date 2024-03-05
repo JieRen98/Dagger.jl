@@ -23,7 +23,7 @@ function pretty_time(t; digits=3)
         "$(r(t)) ns"
     end
 end
-function to_dot(logs, g, labels, procs, tid_to_vertex, arg_names, task_args; disconnected=false, color_by=:fn, layout_engine="dot", times::Bool=true, times_digits::Integer=3)
+function to_dot(logs, g, labels, procs, tid_to_vertex, arg_names, task_args, arg_moves; disconnected=false, color_by=:fn, layout_engine="dot", times::Bool=true, times_digits::Integer=3)
     if !disconnected
         discon_vs = filter(v->isempty(inneighbors(g, v)) && isempty(outneighbors(g, v)), vertices(g))
         con_vs = filter(v->!in(v, discon_vs), vertices(g))
@@ -86,6 +86,14 @@ function to_dot(logs, g, labels, procs, tid_to_vertex, arg_names, task_args; dis
         end
     end
 
+    # Add argument moves
+    for (tid, moves) in arg_moves
+        for (pos, (pre_objid, post_objid)) in moves
+            move_str = "a$pre_objid -> a$post_objid [label=\"move\"]\n"
+            str *= move_str
+        end
+    end
+
     # Add tasks
     for v in con_vs
         if !disconnected && (v in discon_vs)
@@ -94,7 +102,7 @@ function to_dot(logs, g, labels, procs, tid_to_vertex, arg_names, task_args; dis
         label = labels[v]
         color = colors[v]
         proc = procs[v]
-        proc_str = "($(proc.owner), $(proc.tid))"
+        proc_str = '(' * Dagger.short_name(procs[v]) * ')'
         label_str = "$label\\n$proc_str"
         if times
             tid = vertex_to_tid[v]
@@ -109,19 +117,26 @@ function to_dot(logs, g, labels, procs, tid_to_vertex, arg_names, task_args; dis
     edge_sep = is_directed(g) ? "->" : "--"
     for edge in edges(g)
         # FIXME: Label syncdeps with associated arguments and datadeps directions
-        str *= "v$(src(edge)) $edge_sep v$(dst(edge))\n"
+        str *= "v$(src(edge)) $edge_sep v$(dst(edge)) [label=\"syncdep\"]\n"
     end
 
     # Add task arguments
+    con_args = Vector{UInt}(collect(keys(arg_names)))
+    for moves in values(arg_moves)
+        for (_, (pre_objid, post_objid)) in moves
+            push!(con_args, pre_objid)
+            push!(con_args, post_objid)
+        end
+    end
     for (tid, args) in task_args
         id = tid_to_vertex[tid]
         id in con_vs || continue
         for (pos, arg) in args
-            # FIXME: Show argument position
-            if !disconnected && !(arg in keys(arg_names))
+            if !disconnected && !(arg in con_args)
                 continue
             end
-            str *= "a$arg $edge_sep v$id\n"
+            arg_str = pos isa Int ? "arg $pos" : "kwarg $pos"
+            str *= "a$arg $edge_sep v$id [label=\"$arg_str\"]\n"
         end
     end
 
@@ -134,6 +149,7 @@ end
 function logs_task_args(logs)
     arg_names = Dict{UInt,String}()
     task_args = Dict{Int,Vector{Pair{Union{Int,Symbol},UInt}}}()
+    arg_moves = Dict{Int,Vector{Pair{Union{Int,Symbol},Tuple{UInt,UInt}}}}()
     for w in keys(logs)
         for idx in 1:length(logs[w][:core])
             category = logs[w][:core][idx].category
@@ -147,18 +163,26 @@ function logs_task_args(logs)
             elseif category == :add_thunk && kind == :start
                 if haskey(logs[w], :taskargs)
                     id, args = logs[w][:taskargs][idx]::Pair{Int,<:Vector}
-                    append!(get!(Vector{UInt}, task_args, id), args)
+                    append!(get!(Vector{Pair{Union{Int,Symbol},UInt}}, task_args, id), args)
+                end
+            elseif category == :move && kind == :finish
+                if haskey(logs[w], :taskargmoves)
+                    move_info = logs[w][:taskargmoves][idx]
+                    move_info === nothing && continue
+                    tid, pos, pre_objid, post_objid = move_info
+                    v = get!(Vector{Pair{Union{Int,Symbol},Tuple{UInt,UInt}}}, arg_moves, tid)
+                    push!(v, pos => (pre_objid, post_objid))
                 end
             end
         end
     end
-    return arg_names, task_args
+    return arg_names, task_args, arg_moves
 end
 
 function Dagger.render_logs(logs::Dict, ::Val{:graphviz}; options...)
     g, tid_to_vertex, task_names, task_procs = Dagger.logs_task_dependencies(logs)
-    arg_names, task_args = logs_task_args(logs)
-    return to_dot(logs, g, task_names, task_procs, tid_to_vertex, arg_names, task_args; options...)
+    arg_names, task_args, arg_moves = logs_task_args(logs)
+    return to_dot(logs, g, task_names, task_procs, tid_to_vertex, arg_names, task_args, arg_moves; options...)
 end
 
 end

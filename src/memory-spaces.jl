@@ -3,6 +3,7 @@ abstract type MemorySpace end
 struct CPURAMMemorySpace <: MemorySpace
     owner::Int
 end
+root_worker_id(space::CPURAMMemorySpace) = space.owner
 
 memory_space(x) = CPURAMMemorySpace(myid())
 function memory_space(x::Chunk)
@@ -26,13 +27,18 @@ processors(::S) where {S<:MemorySpace} =
 processors(space::CPURAMMemorySpace) =
     Set(proc for proc in get_processors(OSProc(space.owner)) if proc isa ThreadProc)
 
-#= TODO
-function move!(to_space::MemorySpace, from_space::MemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
-    #if to_space.owner == from_space.owner
-        copyto!(to, from)
-    #else
-    #    error("Cross-worker CPU->CPU move! not yet implemented")
-    #end
+function move!(to_space::MemorySpace, from_space::MemorySpace, to::Chunk, from::Chunk)
+    unwrap(x::Chunk) = MemPool.poolget(x.handle)
+    to_w = root_worker_id(to_space)
+    remotecall_wait(to_w, to_space, from_space, to, from) do to_space, from_space, to, from
+        to_raw = unwrap(to)
+        from_w = root_worker_id(from_space)
+        from_raw = to_w == from_w ? unwrap(from) : remotecall_fetch(unwrap, from_w, from)
+        move!(to_space, from_space, to_raw, from_raw)
+    end
     return
 end
-=#
+function move!(to_space::MemorySpace, from_space::MemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
+    copyto!(to, from)
+    return
+end

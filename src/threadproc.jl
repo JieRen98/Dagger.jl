@@ -34,5 +34,6 @@ end
 get_parent(proc::ThreadProc) = OSProc(proc.owner)
 default_enabled(proc::ThreadProc) = true
 
-# TODO: ThreadGroupProc?
+short_name(proc::ThreadProc) = "W: $(proc.owner), TID: $(proc.tid)"
 
+# TODO: ThreadGroupProc?

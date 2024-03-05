@@ -204,14 +204,19 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     filter!(proc->!isa(constrain(ExactScope(proc), scope),
                        InvalidScope),
             all_procs)
+    #=
     if any(proc->!isa(proc, ThreadProc), all_procs)
         @warn "Non-CPU execution not yet supported by `spawn_datadeps`; non-CPU processors will be ignored" maxlog=1
         filter!(proc->!isa(proc, ThreadProc), all_procs)
     end
+    =#
     for proc in all_procs
         for space in memory_spaces(proc)
             push!(all_spaces_set, space)
         end
+    end
+    for space in map(memory_space, collect(keys(queue.deps)))
+        push!(all_spaces_set, space)
     end
     all_spaces = collect(all_spaces_set)
 
@@ -257,19 +262,27 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         for data in keys(queue.deps)
             has_writedep(data) || continue
             data_space = memory_space(data)
+            to_proc = first(processors(space))
+            from_proc = first(processors(data_space))
             if data_space == space
-                this_space_args[data] = Dagger.tochunk(data)
+                data_chunk = tochunk(data, from_proc)
+                this_space_args[data] = data_chunk
+                @assert processor(data_chunk) in processors(space)
+                @assert memory_space(data_chunk) == memory_space(data)
             else
-                # TODO: Can't use @mutable with custom Chunk scope
-                #remote_args[w][data] = Dagger.@mutable worker=w copy(data)
-                to_proc = first(processors(space))
-                from_proc = first(processors(data_space))
                 w = only(unique(map(get_parent, collect(processors(space))))).pid
+                ctx = Sch.eager_context()
+                id = rand(Int)
+                timespan_start(ctx, :move, (;thunk_id=0, id, processor=to_proc), (;f=nothing, data))
                 this_space_args[data] = remotecall_fetch(w, from_proc, to_proc, data) do from_proc, to_proc, data
-                    data_raw = fetch(data)
-                    data_converted = move(from_proc, to_proc, data_raw)
-                    return Dagger.tochunk(data_converted)
+                    data_converted = move(from_proc, to_proc, data)
+                    data_chunk = tochunk(data_converted, to_proc)
+                    @assert processor(data_chunk) in processors(space)
+                    @assert memory_space(data_chunk) == memory_space(data_converted)
+                    @assert memory_space(data_chunk) != memory_space(data) "space preserved! $(memory_space(data_chunk)) != $(memory_space(data)) ($(typeof(data_chunk)) vs. $(typeof(data))), spaces ($data_space -> $space)"
+                    return data_chunk
                 end
+                timespan_finish(ctx, :move, (;thunk_id=0, id, processor=to_proc), (;f=nothing, data=this_space_args[data]))
             end
         end
     end
@@ -350,9 +363,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 copy_to_syncdeps = Set{Any}()
                 get_write_deps!(arg, copy_to_syncdeps)
                 @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx] $(length(copy_to_syncdeps)) syncdeps"
-                # TODO: copy_to = Dagger.@spawn scope=copy_to_scope syncdeps=copy_to_syncdeps Dagger.move!(our_space, data_space, arg_remote, arg_local)
-                copy_to = Dagger.@spawn scope=copy_to_scope syncdeps=copy_to_syncdeps copyto!(arg_remote, arg_local)
+                copy_to = Dagger.@spawn scope=copy_to_scope syncdeps=copy_to_syncdeps meta=true Dagger.move!(our_space, data_space, arg_remote, arg_local)
                 add_writer!(arg, copy_to)
+                wait(copy_to)
 
                 data_locality[arg] = our_space
             else
@@ -370,7 +383,6 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         end
 
         # Launch user's task
-        spec.f = move(ThreadProc(myid(), 1), our_proc, spec.f)
         syncdeps = get(Set{Any}, spec.options, :syncdeps)
         for (_, arg) in task_args
             if is_writedep(arg, task)
@@ -417,8 +429,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             copy_from_syncdeps = Set()
             get_write_deps!(arg, copy_from_syncdeps)
             @dagdebug nothing :spawn_datadeps "$(length(copy_from_syncdeps)) syncdeps"
-            # TODO: copy_from = Dagger.@spawn scope=copy_from_scope syncdeps=copy_from_syncdeps Dagger.move!(data_local_space, data_remote_space, arg_local, arg_remote)
-            copy_from = Dagger.@spawn scope=copy_from_scope syncdeps=copy_from_syncdeps copyto!(arg_local, arg_remote)
+            copy_from = Dagger.@spawn scope=copy_from_scope syncdeps=copy_from_syncdeps meta=true Dagger.move!(data_local_space, data_remote_space, arg_local, arg_remote)
+            # FIXME: Remove me
+            wait(copy_from)
         else
             @dagdebug nothing :spawn_datadeps "Skipped copy-from (local): $data_remote_space"
         end

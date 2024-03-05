@@ -1566,6 +1566,11 @@ function do_task(to_proc, task_desc)
     end
 
     f = popfirst!(fetched)
+    #=
+    if !(to_proc isa Dagger.ThreadProc)
+        println("Dagger mapped from <:$(typeof(first(data))) to $f ($(typeof(f)))")
+    end
+    =#
     @assert !(f isa Chunk) "Failed to unwrap thunk function"
     fetched_args = Any[]
     fetched_kwargs = Pair{Symbol,Any}[]
