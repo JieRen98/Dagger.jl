@@ -383,6 +383,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         end
 
         # Launch user's task
+        # FIXME: Why is this needed?
+        spec.f = move(ThreadProc(myid(), 1), our_proc, spec.f)
         syncdeps = get(Set{Any}, spec.options, :syncdeps)
         for (_, arg) in task_args
             if is_writedep(arg, task)
@@ -391,7 +393,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 get_read_deps!(arg, syncdeps)
             end
         end
-        @dagdebug nothing :spawn_datadeps "($(spec.f)) $(length(syncdeps)) syncdeps"
+        @dagdebug nothing :spawn_datadeps "($(repr(spec.f))) $(length(syncdeps)) syncdeps"
         task_scope = Dagger.ExactScope(our_proc)
         spec.options = merge(spec.options, (;syncdeps, scope=task_scope))
         enqueue!(upper_queue, spec=>task)

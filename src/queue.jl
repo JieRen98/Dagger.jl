@@ -95,7 +95,6 @@ end
 function wait_all(f; check_errors::Bool=false)
     queue = WaitAllQueue(get_options(:task_queue, EagerTaskQueue()), EagerThunk[])
     result = with_options(f; task_queue=queue)
-    @show length(queue.tasks)
     for task in queue.tasks
         if check_errors
             fetch(task; raw=true)
