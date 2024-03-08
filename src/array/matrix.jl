@@ -1,3 +1,4 @@
+#= FIXME: Remove me
 struct Transpose{T,N} <: ArrayOp{T,N}
     f::Function
     input::ArrayOp
@@ -16,11 +17,12 @@ function size(x::Transpose)
     end
 end
 
-transpose(x::ArrayOp) = _to_darray(Transpose(transpose, x))
-transpose(x::Union{Chunk, EagerThunk}) = @spawn transpose(x)
-
-adjoint(x::ArrayOp) = _to_darray(Transpose(adjoint, x))
-adjoint(x::Union{Chunk, EagerThunk}) = @spawn adjoint(x)
+function stage(ctx::Context, node::Transpose)
+    inp = cached_stage(ctx, node.input)
+    thunks = _ctranspose(chunks(inp))
+    return DArray(eltype(inp), domain(inp)', domainchunks(inp)', thunks, inp.partitioning', inp.concat)
+end
+=#
 
 function adjoint(x::ArrayDomain{2})
     d = indexes(x)
@@ -44,11 +46,9 @@ function _ctranspose(x::AbstractArray)
     Any[Dagger.@spawn(adjoint(x[j,i])) for i=1:size(x,2), j=1:size(x,1)]
 end
 
-function stage(ctx::Context, node::Transpose)
-    inp = stage(ctx, node.input)
-    thunks = _ctranspose(chunks(inp))
-    return DArray(eltype(inp), domain(inp)', domainchunks(inp)', thunks, inp.partitioning', inp.concat)
-end
+transpose(x::Union{Chunk, EagerThunk}) = @spawn transpose(x)
+
+adjoint(x::Union{Chunk, EagerThunk}) = @spawn adjoint(x)
 
 import Base: *, +
 
