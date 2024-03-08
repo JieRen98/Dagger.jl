@@ -173,10 +173,6 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     filter!(proc->!isa(constrain(ExactScope(proc), scope),
                        InvalidScope),
             all_procs)
-    if any(proc->!isa(proc, ThreadProc), all_procs)
-        @warn "Non-CPU execution not yet supported by `spawn_datadeps`; non-CPU processors will be ignored" maxlog=1
-        filter!(proc->!isa(proc, ThreadProc), all_procs)
-    end
 
     # Track original and current data locations
     # We track data => space
@@ -337,20 +333,28 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             data = fetch(data; raw=true)
         end
         data_space = memory_space(data)
+        to_proc = first(processors(space))
+        from_proc = first(processors(data_space))
         this_space_args = get!(IdDict{Any,Any}, remote_args, space)
         if data_space == space
-            return Dagger.tochunk(data)
+            data_chunk = tochunk(data, from_proc)
+            this_space_args[data] = data_chunk
+            @assert processor(data_chunk) in processors(space) || data isa Chunk && processor(data) isa Dagger.OSProc
+            @assert memory_space(data_chunk) == memory_space(data)
         else
-            # TODO: Can't use @mutable with custom Chunk scope
-            #remote_args[w][data] = Dagger.@mutable worker=w copy(data)
-            to_proc = first(processors(space))
-            from_proc = first(processors(data_space))
             w = only(unique(map(get_parent, collect(processors(space))))).pid
-            return remotecall_fetch(w, from_proc, to_proc, data) do from_proc, to_proc, data
-                data_raw = fetch(data)
-                data_converted = move(from_proc, to_proc, data_raw)
-                return Dagger.tochunk(data_converted)
+            ctx = Sch.eager_context()
+            id = rand(Int)
+            timespan_start(ctx, :move, (;thunk_id=0, id, processor=to_proc), (;f=nothing, data))
+            this_space_args[data] = remotecall_fetch(w, from_proc, to_proc, data) do from_proc, to_proc, data
+                data_converted = move(from_proc, to_proc, data)
+                data_chunk = tochunk(data_converted, to_proc)
+                @assert processor(data_chunk) in processors(space)
+                @assert memory_space(data_chunk) == memory_space(data_converted)
+                @assert data_space != memory_space(data_chunk) "space preserved! $data_space != $(memory_space(data_chunk)) ($(typeof(data)) vs. $(typeof(data_chunk))), spaces ($data_space -> $space)"
+                return data_chunk
             end
+            timespan_finish(ctx, :move, (;thunk_id=0, id, processor=to_proc), (;f=nothing, data=this_space_args[data]))
         end
         return this_space_args[data]
     end
@@ -409,7 +413,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         our_space = only(memory_spaces(our_proc))
 
         spec.f = move(ThreadProc(myid(), 1), our_proc, spec.f)
-        @dagdebug nothing :spawn_datadeps "($(spec.f)) Scheduling: $our_proc ($our_space)"
+        @dagdebug nothing :spawn_datadeps "($(repr(spec.f))) Scheduling: $our_proc ($our_space)"
 
         # Copy raw task arguments for analysis
         task_args = copy(spec.args)
@@ -424,7 +428,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             arg = arg isa EagerThunk ? fetch(arg; raw=true) : arg
             populate_argument_info!(arg, deps)
             if !has_writedep(arg, deps, task)
-                @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx] Skipped copy-to (unwritten)"
+                @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (unwritten)"
                 spec.args[idx] = pos => arg
                 continue
             end
@@ -440,20 +444,20 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     nonlocal = our_space != data_space
                     if nonlocal
                         # Add copy-to operation (depends on latest owner of arg)
-                        @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx][$dep_mod] Enqueueing copy-to: $data_space => $our_space"
+                        @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Enqueueing copy-to: $data_space => $our_space"
                         arg_local = get!(get!(IdDict{Any,Any}, remote_args, data_space), arg) do
                             generate_slot!(data_space, arg)
                         end
                         copy_to_scope = ExactScope(our_proc)
                         copy_to_syncdeps = Set{Any}()
                         get_write_deps!(ainfo, task, write_num, copy_to_syncdeps)
-                        @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx][$dep_mod] $(length(copy_to_syncdeps)) syncdeps"
+                        @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] $(length(copy_to_syncdeps)) syncdeps"
                         copy_to = Dagger.@spawn scope=copy_to_scope syncdeps=copy_to_syncdeps meta=true Dagger.move!(dep_mod, our_space, data_space, arg_remote, arg_local)
                         add_writer!(ainfo, copy_to, write_num)
 
                         data_locality[ainfo] = our_space
                     else
-                        @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx][$dep_mod] Skipped copy-to (local): $data_space"
+                        @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Skipped copy-to (local): $data_space"
                     end
                 end
             else
@@ -461,20 +465,20 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 nonlocal = our_space != data_space
                 if nonlocal
                     # Add copy-to operation (depends on latest owner of arg)
-                    @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx] Enqueueing copy-to: $data_space => $our_space"
+                    @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Enqueueing copy-to: $data_space => $our_space"
                     arg_local = get!(get!(IdDict{Any,Any}, remote_args, data_space), arg) do
                         generate_slot!(data_space, arg)
                     end
                     copy_to_scope = ExactScope(our_proc)
                     copy_to_syncdeps = Set{Any}()
                     get_write_deps!(arg, copy_to_syncdeps)
-                    @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx] $(length(copy_to_syncdeps)) syncdeps"
+                    @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] $(length(copy_to_syncdeps)) syncdeps"
                     copy_to = Dagger.@spawn scope=copy_to_scope syncdeps=copy_to_syncdeps Dagger.move!(identity, our_space, data_space, arg_remote, arg_local)
                     add_writer!(arg, copy_to)
 
                     data_locality[arg] = our_space
                 else
-                    @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx] Skipped copy-to (local): $data_space"
+                    @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Skipped copy-to (local): $data_space"
                 end
             end
             spec.args[idx] = pos => arg_remote
@@ -486,7 +490,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             _, deps = unwrap_inout(task_args[idx][2])
             if is_writedep(arg, deps, task)
                 arg_space = memory_space(arg)
-                @assert arg_space == our_space "($(spec.f))[$idx] Tried to pass $(typeof(arg)) from $arg_space to $our_space"
+                @assert arg_space == our_space "($(repr(spec.f)))[$idx] Tried to pass $(typeof(arg)) from $arg_space to $our_space"
             end
         end
 
@@ -499,7 +503,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 for (dep_mod, _, writedep) in deps
                     ainfo = aliasing(arg, dep_mod)
                     if writedep
-                        @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx][$dep_mod] Sync with owner/readers"
+                        @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Sync with owner/readers"
                         get_write_deps!(ainfo, task, write_num, syncdeps)
                     else
                         get_read_deps!(ainfo, task, write_num, syncdeps)
@@ -507,14 +511,14 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 end
             else
                 if is_writedep(arg, deps, task)
-                    @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx] Sync with owner/readers"
+                    @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Sync with owner/readers"
                     get_write_deps!(arg, syncdeps)
                 else
                     get_read_deps!(arg, syncdeps)
                 end
             end
         end
-        @dagdebug nothing :spawn_datadeps "($(spec.f)) $(length(syncdeps)) syncdeps"
+        @dagdebug nothing :spawn_datadeps "($(repr(spec.f))) $(length(syncdeps)) syncdeps"
         task_scope = Dagger.ExactScope(our_proc)
         spec.options = merge(spec.options, (;syncdeps, scope=task_scope))
         enqueue!(upper_queue, spec=>task)
@@ -527,7 +531,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 for (dep_mod, _, writedep) in deps
                     ainfo = aliasing(arg, dep_mod)
                     if writedep
-                        @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx][$dep_mod] Set as owner"
+                        @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Set as owner"
                         add_writer!(ainfo, task, write_num)
                     else
                         add_reader!(ainfo, task, write_num)
@@ -535,7 +539,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 end
             else
                 if is_writedep(arg, deps, task)
-                    @dagdebug nothing :spawn_datadeps "($(spec.f))[$idx] Set as owner"
+                    @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Set as owner"
                     add_writer!(arg, task)
                 else
                     add_reader!(arg, task)
