@@ -32,6 +32,8 @@ struct DataDepsTaskQueue <: AbstractTaskQueue
     task_to_id::Union{Dict{EagerThunk,Int},Nothing}
     # How to traverse the dependency graph when launching tasks
     traversal::Symbol
+    # Which scheduler to use to assign tasks to processors
+    scheduler::Symbol
 
     # Whether aliasing across arguments is possible
     # The fields following only apply when aliasing==true
@@ -40,12 +42,14 @@ struct DataDepsTaskQueue <: AbstractTaskQueue
     dependencies::Vector{Pair{EagerThunk,Vector{Tuple{Bool,Bool,<:AbstractAliasing,<:Any,<:Any}}}}
 
     function DataDepsTaskQueue(upper_queue;
-                               traversal::Symbol=:inorder, aliasing::Bool=true)
+                               traversal::Symbol=:inorder,
+                               scheduler::Symbol=:naive,
+                               aliasing::Bool=true)
         seen_tasks = Pair{EagerTaskSpec,EagerThunk}[]
         g = SimpleDiGraph()
         task_to_id = Dict{EagerThunk,Int}()
         dependencies = Pair{EagerThunk,Vector{Tuple{Bool,Bool,<:AbstractAliasing,<:Any,<:Any}}}[]
-        return new(upper_queue, seen_tasks, g, task_to_id, traversal,
+        return new(upper_queue, seen_tasks, g, task_to_id, traversal, scheduler,
                    aliasing, dependencies)
     end
 end
@@ -360,7 +364,6 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     end
 
     # Round-robin assign tasks to processors
-    proc_idx = 1
     upper_queue = get_options(:task_queue)
 
     traversal = queue.traversal
@@ -408,8 +411,82 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
     # Start launching tasks and necessary copies
     write_num = 1
+    proc_idx = 1
+    pressures = Dict{Processor,UInt64}()
     for (spec, task) in queue.seen_tasks[task_order]
-        our_proc = all_procs[proc_idx]
+        # Populate all task dependencies
+        populate_task_info!(spec, task)
+
+        @assert !queue.aliasing
+        scheduler = queue.scheduler
+        if scheduler == :naive
+            raw_args = map(arg->tochunk(last(arg)), spec.args)
+            our_proc = remotecall_fetch(1, all_procs, raw_args) do all_procs, raw_args
+                Sch.init_eager()
+                state = Sch.EAGER_STATE[]
+
+                @lock state.lock begin
+                    # Calculate costs per processor and select the most optimal
+                    # FIXME: This should consider any already-allocated slots,
+                    # whether they are up-to-date, and if not, the cost of moving
+                    # data to them
+                    procs, costs = Sch.estimate_task_costs(state, all_procs, nothing, raw_args)
+                    return first(procs)
+                end
+            end
+        elseif scheduler == :smart
+            raw_args = map(filter(arg->haskey(data_locality, arg), spec.args)) do arg
+                arg_chunk = tochunk(last(arg))
+                # Only the owned slot is valid
+                # FIXME: Track up-to-date copies and pass all of those
+                return arg_chunk => data_locality[arg]
+            end
+            f_chunk = tochunk(spec.f)
+            our_proc, task_pressure = remotecall_fetch(1, all_procs, pressures, f_chunk, raw_args) do all_procs, pressures, f, chunks_locality
+                Sch.init_eager()
+                state = Sch.EAGER_STATE[]
+
+                @lock state.lock begin
+                    tx_rate = state.transfer_rate[]
+
+                    costs = Dict{Processor,Float64}()
+                    for proc in all_procs
+                        # Filter out chunks that are already local
+                        chunks_filt = Iterators.filter(((chunk, space)=chunk_locality)->!(proc in processors(space)), chunks_locality)
+
+                        # Estimate network transfer costs based on data size
+                        # N.B. `affinity(x)` really means "data size of `x`"
+                        # N.B. We treat same-worker transfers as having zero transfer cost
+                        tx_cost = Sch.impute_sum(affinity(chunk)[2] for chunk in chunks_filt)
+
+                        # Estimate total cost to move data and get task running after currently-scheduled tasks
+                        est_time_util = get(pressures, proc, UInt64(0))
+                        costs[proc] = est_time_util + (tx_cost/tx_rate)
+                    end
+
+                    # Look up estimated task cost
+                    sig = Sch.signature(state, f, map(first, chunks_locality))
+                    task_pressure = get(state.signature_time_cost, sig, 1000^3)
+
+                    # Shuffle procs around, so equally-costly procs are equally considered
+                    P = randperm(length(all_procs))
+                    procs = getindex.(Ref(all_procs), P)
+
+                    # Sort by lowest cost first
+                    sort!(procs, by=p->costs[p])
+
+                    best_proc = first(procs)
+                    return best_proc, task_pressure
+                end
+            end
+            # FIXME: Pressure should be decreased by pressure of syncdeps on same processor
+            pressures[our_proc] = get(pressures, our_proc, UInt64(0)) + task_pressure
+        elseif scheduler == :roundrobin
+            our_proc = all_procs[proc_idx]
+        else
+            error("Invalid scheduler: $sched")
+        end
+        @assert our_proc in all_procs
         our_space = only(memory_spaces(our_proc))
 
         spec.f = move(ThreadProc(myid(), 1), our_proc, spec.f)
@@ -417,9 +494,6 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
         # Copy raw task arguments for analysis
         task_args = copy(spec.args)
-
-        # Populate all task dependencies
-        populate_task_info!(spec, task)
 
         # Copy args from local to remote
         for (idx, (pos, arg)) in enumerate(task_args)
@@ -547,9 +621,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             end
         end
         write_num += 1
-
-        # Select the next processor to use
-        proc_idx = mod1(proc_idx+1, length(all_procs))
+        proc_idx = mod1(proc_idx + 1, length(all_procs))
     end
 
     # Copy args from remote to local
@@ -672,15 +744,19 @@ worse performance for a given set of datadeps tasks. This argument is
 experimental and subject to change.
 """
 function spawn_datadeps(f::Base.Callable; static::Bool=true,
-                        traversal::Symbol=:inorder, aliasing::Bool=true)
+                        traversal::Symbol=:inorder,
+                        scheduler::Union{Symbol,Nothing}=nothing,
+                        aliasing::Bool=true)
     if !static
         throw(ArgumentError("Dynamic scheduling is no longer available"))
     end
     wait_all(; check_errors=true) do
+        scheduler = something(scheduler, DATADEPS_SCHEDULER[], :naive)::Symbol
         queue = DataDepsTaskQueue(get_options(:task_queue, EagerTaskQueue());
-                                  traversal, aliasing)
+                                  traversal, scheduler, aliasing)
         result = with_options(f; task_queue=queue)
         distribute_tasks!(queue)
         return result
     end
 end
+const DATADEPS_SCHEDULER = ScopedValue{Union{Symbol,Nothing}}(nothing)
