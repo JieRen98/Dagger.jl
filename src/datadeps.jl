@@ -435,6 +435,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 end
             end
         elseif scheduler == :smart
+            # FIXME: Track pressures by on memory space, since work-stealing can occur
             raw_args = map(filter(arg->haskey(data_locality, arg), spec.args)) do arg
                 arg_chunk = tochunk(last(arg))
                 # Only the owned slot is valid
@@ -488,6 +489,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         end
         @assert our_proc in all_procs
         our_space = only(memory_spaces(our_proc))
+        our_procs = collect(processors(our_space))
+        our_scope = UnionScope(map(ExactScope, our_procs)...)
 
         spec.f = move(ThreadProc(myid(), 1), our_proc, spec.f)
         @dagdebug nothing :spawn_datadeps "($(repr(spec.f))) Scheduling: $our_proc ($our_space)"
@@ -522,7 +525,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                         arg_local = get!(get!(IdDict{Any,Any}, remote_args, data_space), arg) do
                             generate_slot!(data_space, arg)
                         end
-                        copy_to_scope = ExactScope(our_proc)
+                        copy_to_scope = our_scope
                         copy_to_syncdeps = Set{Any}()
                         get_write_deps!(ainfo, task, write_num, copy_to_syncdeps)
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] $(length(copy_to_syncdeps)) syncdeps"
@@ -543,7 +546,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     arg_local = get!(get!(IdDict{Any,Any}, remote_args, data_space), arg) do
                         generate_slot!(data_space, arg)
                     end
-                    copy_to_scope = ExactScope(our_proc)
+                    copy_to_scope = our_scope
                     copy_to_syncdeps = Set{Any}()
                     get_write_deps!(arg, copy_to_syncdeps)
                     @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] $(length(copy_to_syncdeps)) syncdeps"
@@ -593,7 +596,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             end
         end
         @dagdebug nothing :spawn_datadeps "($(repr(spec.f))) $(length(syncdeps)) syncdeps"
-        task_scope = Dagger.ExactScope(our_proc)
+        task_scope = our_scope
         spec.options = merge(spec.options, (;syncdeps, scope=task_scope))
         enqueue!(upper_queue, spec=>task)
 
@@ -667,7 +670,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     arg_remote = remote_args[data_remote_space][arg]
                     @assert arg_remote !== arg_local
                     data_local_proc = first(processors(data_local_space))
-                    copy_from_scope = ExactScope(data_local_proc)
+                    copy_from_scope = UnionScope(map(ExactScope, collect(processors(data_local_space)))...)
                     copy_from_syncdeps = Set()
                     get_write_deps!(ainfo, nothing, write_num, copy_from_syncdeps)
                     @dagdebug nothing :spawn_datadeps "$(length(copy_from_syncdeps)) syncdeps"
