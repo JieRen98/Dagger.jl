@@ -417,7 +417,6 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         # Populate all task dependencies
         populate_task_info!(spec, task)
 
-        @assert !queue.aliasing
         scheduler = queue.scheduler
         if scheduler == :naive
             raw_args = map(arg->tochunk(last(arg)), spec.args)
