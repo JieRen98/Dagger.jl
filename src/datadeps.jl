@@ -208,6 +208,9 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             # Unwrap the Chunk underlying any EagerThunk arguments
             arg_data = arg isa EagerThunk ? fetch(arg; raw=true) : arg
 
+            # Skip non-mutable arguments
+            ismutable(arg_data) || continue
+
             # Add all aliasing dependencies
             for (dep_mod, readdep, writedep) in deps
                 if queue.aliasing

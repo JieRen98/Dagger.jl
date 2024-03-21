@@ -87,8 +87,8 @@ function Base.isless(ptr1::RemotePtr, ptr2::RemotePtr)
     return ptr1.addr < ptr2.addr
 end
 
-struct MemorySpan
-    ptr::RemotePtr{Cvoid}
+struct MemorySpan{S}
+    ptr::RemotePtr{Cvoid,S}
     len::UInt
 end
 
@@ -98,7 +98,7 @@ memory_spans(x) = memory_spans(aliasing(x))
 memory_spans(x, T) = memory_spans(aliasing(x, T))
 
 struct NoAliasing <: AbstractAliasing end
-memory_spans(::NoAliasing) = MemorySpan[]
+memory_spans(::NoAliasing) = MemorySpan{CPURAMMemorySpace}[]
 struct UnknownAliasing <: AbstractAliasing end
 memory_spans(::UnknownAliasing) = [MemorySpan(C_NULL, typemax(UInt))]
 
@@ -109,16 +109,17 @@ aliasing(x::Chunk) = remotecall_fetch(root_worker_id(x.processor), x) do x
 end
 aliasing(x::EagerThunk) = aliasing(fetch(x; raw=true))
 
-struct ContiguousAliasing <: AbstractAliasing
-    span::MemorySpan
+struct ContiguousAliasing{S} <: AbstractAliasing
+    span::MemorySpan{S}
 end
-memory_spans(a::ContiguousAliasing) = [a.span]
+memory_spans(a::ContiguousAliasing{S}) where S = MemorySpan{S}[a.span]
 struct IteratedAliasing{T} <: AbstractAliasing
     x::T
 end
 function aliasing(x::Array{T}) where T
     if isbitstype(T)
-        return ContiguousAliasing(MemorySpan(pointer(x), sizeof(T)*length(x)))
+        S = CPURAMMemorySpace
+        return ContiguousAliasing(MemorySpan{S}(pointer(x), sizeof(T)*length(x)))
     else
         # FIXME: Also ContiguousAliasing of container
         return IteratedAliasing(x)
@@ -128,13 +129,13 @@ aliasing(x::Array{T,0}) where T = NoAliasing()
 aliasing(x::Transpose) = aliasing(parent(x))
 aliasing(x::Adjoint) = aliasing(parent(x))
 
-struct StridedAliasing{T,N} <: AbstractAliasing
-    ptr::RemotePtr{Cvoid}
+struct StridedAliasing{T,N,S} <: AbstractAliasing
+    ptr::RemotePtr{Cvoid,S}
     lengths::NTuple{N,Int}
     strides::NTuple{N,Int}
 end
-function memory_spans(a::StridedAliasing{T,N}) where {T,N}
-    spans = MemorySpan[]
+function memory_spans(a::StridedAliasing{T,N,S}) where {T,N,S}
+    spans = MemorySpan{S}[]
     _memory_spans(a, spans, a.ptr, N)
     return spans
 end
@@ -164,14 +165,14 @@ function aliasing(x::SubArray{T}) where T
     end
 end
 
-struct TriangularAliasing{T} <: AbstractAliasing
-    ptr::RemotePtr{Cvoid}
+struct TriangularAliasing{T,S} <: AbstractAliasing
+    ptr::RemotePtr{Cvoid,S}
     stride::Int
     isupper::Bool
     diagonal::Bool
 end
-function memory_spans(a::TriangularAliasing{T}) where T
-    spans = MemorySpan[]
+function memory_spans(a::TriangularAliasing{T,S}) where {T,S}
+    spans = MemorySpan{S}[]
     ptr = a.ptr
     for i in 1:a.stride
         if a.isupper
@@ -196,12 +197,12 @@ aliasing(x::UnitUpperTriangular{T}) where T =
 aliasing(x::UnitLowerTriangular{T}) where T =
     TriangularAliasing{T}(pointer(parent(x)), size(parent(x), 1), false, false)
 
-struct DiagonalAliasing{T} <: AbstractAliasing
-    ptr::RemotePtr{Cvoid}
+struct DiagonalAliasing{T,S} <: AbstractAliasing
+    ptr::RemotePtr{Cvoid,S}
     stride::Int
 end
-function memory_spans(a::DiagonalAliasing{T}) where T
-    spans = MemorySpan[]
+function memory_spans(a::DiagonalAliasing{T,S}) where {T,S}
+    spans = MemorySpan{S}[]
     ptr = a.ptr
     for i in 1:a.stride
         push!(spans, MemorySpan(ptr, sizeof(T)))
@@ -215,7 +216,25 @@ aliasing(x::AbstractMatrix{T}, ::Type{Diagonal}) where T =
 # FIXME: Tridiagonal
 
 function will_alias(x, y)
-    for x_span in memory_spans(x), y_span in memory_spans(y)
+    x isa NoAliasing || y isa NoAliasing && return false
+    x isa UnknownAliasing || y isa UnknownAliasing && return true
+    # FIXME: Support mixed-space span sets (for nested data structures)
+    x_spans = memory_spans(x)::Vector{<:MemorySpan}
+    y_spans = memory_spans(y)::Vector{<:MemorySpan}
+    return will_alias(x_spans, y_spans)
+end
+function will_alias(x_spans::Vector{MemorySpan{Sx}}, y_spans::Vector{MemorySpan{Sy}}) where {Sx,Sy}
+    # Quick check if spaces can alias
+    if !isempty(x_spans) && !isempty(y_spans)
+        x_space = x_spans[1].ptr.space
+        y_space = y_spans[1].ptr.space
+        if !may_alias(x_space, y_space)
+            return false
+        end
+    end
+
+    # Check all spans against each other
+    for x_span in x_spans, y_span in y_spans
         if will_alias(x_span, y_span)
             return true
         end
@@ -253,6 +272,7 @@ function aliases_with(x, others)
     return matched
 end
 
+@warn "Fix overlaps_all" maxlog=1
 overlaps_all(ainfo1, ainfo2) =
     overlaps_all(memory_spans(ainfo1), memory_spans(ainfo2))
 function overlaps_all(spans1::Vector{MemorySpan}, spans2::Vector{MemorySpan})
