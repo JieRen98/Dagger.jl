@@ -279,7 +279,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # Aliasing
     function get_write_deps!(ainfo::AbstractAliasing, task, write_num, syncdeps)
         ainfo isa NoAliasing && return
-        for (other_ainfo, other_task_write_num) in ainfos_owner
+        for other_ainfo in keys(ainfos_owner)
+            other_task_write_num = ainfos_owner[other_ainfo]
             other_ainfo isa NoAliasing && continue
             will_alias(ainfo, other_ainfo) || continue
             other_task_write_num === nothing && continue
@@ -291,7 +292,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     end
     function get_read_deps!(ainfo::AbstractAliasing, task, write_num, syncdeps)
         ainfo isa NoAliasing && return
-        for (other_ainfo, other_tasks) in ainfos_readers
+        for other_ainfo in keys(ainfos_readers)
+            other_tasks = ainfos_readers[other_ainfo]
             other_ainfo isa NoAliasing && continue
             will_alias(ainfo, other_ainfo) || continue
             for (other_task, other_write_num) in other_tasks
