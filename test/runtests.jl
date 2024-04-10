@@ -10,6 +10,7 @@ tests = [
     ("Mutation", "mutation.jl"),
     ("Task Queues", "task-queues.jl"),
     ("Datadeps", "datadeps.jl"),
+    ("Streaming", "streaming.jl"),
     ("Domain Utilities", "domain.jl"),
     ("Array - Core", "array/core.jl"),
     ("Array - Copies", "array/copies.jl"),
@@ -68,7 +69,6 @@ else
     to_test = all_test_names
     @info "Running all tests"
 end
-
 
 using Distributed
 addprocs(3)
