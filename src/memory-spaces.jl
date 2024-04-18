@@ -100,7 +100,7 @@ memory_spans(x, T) = memory_spans(aliasing(x, T))
 struct NoAliasing <: AbstractAliasing end
 memory_spans(::NoAliasing) = MemorySpan{CPURAMMemorySpace}[]
 struct UnknownAliasing <: AbstractAliasing end
-memory_spans(::UnknownAliasing) = [MemorySpan(C_NULL, typemax(UInt))]
+memory_spans(::UnknownAliasing) = [MemorySpan{CPURAMMemorySpace}(C_NULL, typemax(UInt))]
 
 aliasing(x, T) = aliasing(T(x))
 aliasing(x) = isbits(x) ? NoAliasing() : UnknownAliasing()

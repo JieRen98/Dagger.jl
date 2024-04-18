@@ -570,7 +570,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                     if nonlocal
                         # Add copy-to operation (depends on latest owner of arg)
                         @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx][$dep_mod] Enqueueing copy-to: $data_space => $our_space"
-                        arg_local = get!(get!(IdDict{Any,Any}, remote_args, data_space), arg) do
+                        arg_local = get!(get!(IdDict{Any,Any}, state.remote_args, data_space), arg) do
                             generate_slot!(state, data_space, arg)
                         end
                         copy_to_scope = our_scope
@@ -591,7 +591,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 if nonlocal
                     # Add copy-to operation (depends on latest owner of arg)
                     @dagdebug nothing :spawn_datadeps "($(repr(spec.f)))[$idx] Enqueueing copy-to: $data_space => $our_space"
-                    arg_local = get!(get!(IdDict{Any,Any}, remote_args, data_space), arg) do
+                    arg_local = get!(get!(IdDict{Any,Any}, state.remote_args, data_space), arg) do
                         generate_slot!(state, data_space, arg)
                     end
                     copy_to_scope = our_scope
@@ -715,8 +715,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
                 if data_local_space != data_remote_space
                     # Add copy-from operation
                     @dagdebug nothing :spawn_datadeps "[$dep_mod] Enqueueing copy-from: $data_remote_space => $data_local_space"
-                    arg_local = astate.remote_args[data_local_space][arg]
-                    arg_remote = astate.remote_args[data_remote_space][arg]
+                    arg_local = state.remote_args[data_local_space][arg]
+                    arg_remote = state.remote_args[data_remote_space][arg]
                     @assert arg_remote !== arg_local
                     data_local_proc = first(processors(data_local_space))
                     copy_from_scope = UnionScope(map(ExactScope, collect(processors(data_local_space)))...)
@@ -743,8 +743,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             if data_local_space != data_remote_space
                 # Add copy-from operation
                 @dagdebug nothing :spawn_datadeps "Enqueueing copy-from: $data_remote_space => $data_local_space"
-                arg_local = remote_args[data_local_space][arg]
-                arg_remote = remote_args[data_remote_space][arg]
+                arg_local = state.remote_args[data_local_space][arg]
+                arg_remote = state.remote_args[data_remote_space][arg]
                 @assert arg_remote !== arg_local
                 data_local_proc = first(processors(data_local_space))
                 copy_from_scope = ExactScope(data_local_proc)
