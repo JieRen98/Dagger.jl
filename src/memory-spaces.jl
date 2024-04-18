@@ -122,7 +122,8 @@ function aliasing(x::Array{T}) where T
         return ContiguousAliasing(MemorySpan{S}(pointer(x), sizeof(T)*length(x)))
     else
         # FIXME: Also ContiguousAliasing of container
-        return IteratedAliasing(x)
+        #return IteratedAliasing(x)
+        return UnknownAliasing()
     end
 end
 aliasing(x::Array{T,0}) where T = NoAliasing()
@@ -139,7 +140,7 @@ function memory_spans(a::StridedAliasing{T,N,S}) where {T,N,S}
     _memory_spans(a, spans, a.ptr, N)
     return spans
 end
-function _memory_spans(a::StridedAliasing{T}, spans, ptr, dim) where T
+function _memory_spans(a::StridedAliasing{T,N,S}, spans, ptr, dim) where {T,N,S}
     lengths = a.lengths
     strides = a.strides
 
@@ -149,7 +150,7 @@ function _memory_spans(a::StridedAliasing{T}, spans, ptr, dim) where T
             ptr += sizeof(T)*strides[dim]
         end
     else
-        push!(spans, MemorySpan(ptr, sizeof(T)*lengths[1]))
+        push!(spans, MemorySpan{S}(ptr, sizeof(T)*lengths[1]))
         return
     end
 
@@ -157,12 +158,25 @@ function _memory_spans(a::StridedAliasing{T}, spans, ptr, dim) where T
 end
 function aliasing(x::SubArray{T}) where T
     if isbitstype(T)
-        return StridedAliasing{T,ndims(x)}(RemotePtr{Cvoid}(pointer(x)),
-                                           size(x), strides(parent(x)))
+        S = CPURAMMemorySpace
+        return StridedAliasing{T,ndims(x),S}(RemotePtr{Cvoid}(pointer(x)),
+                                             size(x), strides(parent(x)))
     else
         # FIXME: Also ContiguousAliasing of container
-        return IteratedAliasing(x)
+        #return IteratedAliasing(x)
+        return UnknownAliasing()
     end
+end
+function will_alias(x::StridedAliasing{T,N,S}, y::StridedAliasing{T,N,S}) where {T,N,S}
+    # TODO: Upgrade Contiguous/StridedAlising to same number of dims
+    for dim in 1:N
+        x_span = MemorySpan{S}(x.ptr, sizeof(T)*x.strides[dim])
+        y_span = MemorySpan{S}(y.ptr, sizeof(T)*y.strides[dim])
+        if !will_alias(x_span, y_span)
+            return false
+        end
+    end
+    return true
 end
 
 struct TriangularAliasing{T,S} <: AbstractAliasing
@@ -248,28 +262,6 @@ function will_alias(x_span::MemorySpan, y_span::MemorySpan)
     x_end = x_span.ptr + x_span.len - 1
     y_end = y_span.ptr + y_span.len - 1
     return x_span.ptr <= y_end && y_span.ptr <= x_end
-end
-
-function aliases_with(x, others)
-    x_space = memory_space(x)
-    matched = Any[]
-    for other in others
-        other_space = memory_space(other)
-        if may_alias(x_space, other_space)
-            x_aliasing = aliasing(x)
-            other_aliasing = aliasing(other)
-            if x_aliasing isa NoAliasing || other_aliasing isa NoAliasing
-                continue
-            end
-            if x_aliasing isa UnknownAliasing || other_aliasing isa Unknown_Aliasing
-                push!(matched, other)
-            end
-            if will_alias(aliasing(x), aliasing(other))
-                push!(matched, other)
-            end
-        end
-    end
-    return matched
 end
 
 @warn "Fix overlaps_all" maxlog=1
