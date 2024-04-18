@@ -63,7 +63,6 @@ function eager_submit_internal!(ctx, state, task, tid, payload; uid_to_tid=Dict{
                     end
                     @assert newarg !== nothing
                     arg = newarg::Chunk
-                    #arg = only(Iterators.filter(o->o isa Chunk && o.handle == arg.handle, keys(state.waiting_data)))::Chunk
                 end
                 WeakChunk(arg)
             else
